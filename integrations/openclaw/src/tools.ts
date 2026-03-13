@@ -16,7 +16,6 @@ const MEMORY_CATEGORIES = [
   "other",
 ] as const;
 
-// Map OpenClaw categories to MSAM streams
 const CATEGORY_TO_STREAM: Record<string, string> = {
   preference: "semantic",
   fact: "semantic",
@@ -28,9 +27,6 @@ const CATEGORY_TO_STREAM: Record<string, string> = {
 export interface ToolDeps {
   client: MsamClient;
   agentId: string;
-  fallbackStore?: (text: string, category: string) => Promise<{ id: string } | null>;
-  fallbackRecall?: (query: string, limit: number) => Promise<any[]>;
-  dualWrite: boolean;
 }
 
 function resolveAgentId(runtimeAgentId: unknown, fallback: string): string {
@@ -65,7 +61,7 @@ export function registerAllTools(
           category: Type.Optional(stringEnum(MEMORY_CATEGORIES)),
         }),
         async execute(_toolCallId, params) {
-          const { query, limit = 5, scope, category } = params as {
+          const { query, limit = 5, category } = params as {
             query: string;
             limit?: number;
             scope?: string;
@@ -110,23 +106,6 @@ export function registerAllTools(
               },
             };
           } catch (error) {
-            // Fallback to lancedb-pro
-            if (deps.fallbackRecall) {
-              try {
-                const fallbackResults = await deps.fallbackRecall(query, limit);
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: `[fallback] Found ${fallbackResults.length} memories via lancedb-pro`,
-                    },
-                  ],
-                  details: { source: "lancedb-pro-fallback", count: fallbackResults.length },
-                };
-              } catch {
-                // Both failed
-              }
-            }
             return {
               content: [
                 {
@@ -161,7 +140,7 @@ export function registerAllTools(
           scope: Type.Optional(Type.String({ description: "Memory scope" })),
         }),
         async execute(_toolCallId, params) {
-          const { text, importance = 0.7, category = "other", scope } = params as {
+          const { text, importance = 0.7, category = "other" } = params as {
             text: string;
             importance?: number;
             category?: string;
@@ -174,13 +153,8 @@ export function registerAllTools(
               stream: CATEGORY_TO_STREAM[category] || "semantic",
               agent_id: agentId,
               source_type: "tool",
-              metadata: { importance, category, scope },
+              metadata: { importance, category },
             });
-
-            // Dual-write to lancedb-pro (best-effort)
-            if (deps.dualWrite && deps.fallbackStore) {
-              deps.fallbackStore(text, category).catch(() => {});
-            }
 
             return {
               content: [
@@ -199,20 +173,6 @@ export function registerAllTools(
               },
             };
           } catch (error) {
-            // Fallback
-            if (deps.fallbackStore) {
-              try {
-                const fb = await deps.fallbackStore(text, category);
-                return {
-                  content: [
-                    { type: "text", text: `[fallback] Stored via lancedb-pro: "${text.slice(0, 80)}..."` },
-                  ],
-                  details: { source: "lancedb-pro-fallback", id: fb?.id },
-                };
-              } catch {
-                // Both failed
-              }
-            }
             return {
               content: [
                 {
@@ -280,7 +240,7 @@ export function registerAllTools(
 
               if (results.atoms.length === 1 && results.atoms[0].similarity > 0.8) {
                 const atom = results.atoms[0];
-                const tombResult = await deps.client.tombstone(atom.id);
+                await deps.client.tombstone(atom.id);
                 return {
                   content: [
                     { type: "text", text: `Forgotten: "${atom.content.slice(0, 80)}"` },
@@ -357,10 +317,8 @@ export function registerAllTools(
           }
 
           try {
-            // Tombstone old atom
             await deps.client.tombstone(memoryId);
 
-            // Store new atom with updated content
             const newContent = text || "(updated metadata only)";
             const result = await deps.client.store({
               content: newContent,
@@ -467,7 +425,6 @@ export function registerAllTools(
           };
 
           try {
-            // MSAM doesn't have a list endpoint, so use a broad query
             const result = await deps.client.query({
               query: "*",
               top_k: Math.min(Math.max(1, limit), 50),

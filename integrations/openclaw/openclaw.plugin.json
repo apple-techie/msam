@@ -1,8 +1,8 @@
 {
   "id": "msam-bridge",
   "name": "Memory (MSAM Bridge)",
-  "description": "Multi-Stream Adaptive Memory with ACT-R scoring, confidence-gated retrieval, knowledge graph, and cognitive decay. Bridges OpenClaw to MSAM with circuit breaker fallback to lancedb-pro.",
-  "version": "1.0.0",
+  "description": "Multi-Stream Adaptive Memory with ACT-R scoring, confidence-gated retrieval, knowledge graph, and cognitive decay.",
+  "version": "1.1.0",
   "kind": "memory",
   "configSchema": {
     "type": "object",
@@ -10,7 +10,8 @@
     "properties": {
       "msamUrl": {
         "type": "string",
-        "default": "http://127.0.0.1:3901"
+        "default": "http://127.0.0.1:3901",
+        "description": "MSAM server URL"
       },
       "msamApiKey": {
         "type": "string",
@@ -18,32 +19,28 @@
       },
       "agentId": {
         "type": "string",
-        "default": "enduru"
+        "default": "default",
+        "description": "Fallback agent ID (runtime ctx.agentId takes precedence)"
       },
       "vocEnabled": {
         "type": "boolean",
-        "default": false
-      },
-      "fallbackToLancedb": {
-        "type": "boolean",
-        "default": true
+        "default": false,
+        "description": "Enable Value of Computation logging (log-only, never gates LLM)"
       },
       "autoCapture": {
         "type": "boolean",
-        "default": true
+        "default": true,
+        "description": "Auto-capture key facts from conversations"
       },
       "autoRecall": {
         "type": "boolean",
-        "default": true
+        "default": true,
+        "description": "Auto-inject relevant memories before agent starts"
       },
       "enableManagementTools": {
         "type": "boolean",
-        "default": true
-      },
-      "dualWrite": {
-        "type": "boolean",
         "default": true,
-        "description": "Write to both MSAM and lancedb-pro during transition"
+        "description": "Register memory management tools (forget, update, list, stats)"
       }
     }
   }
