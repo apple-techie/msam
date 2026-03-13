@@ -98,6 +98,8 @@ class StoreRequest(BaseModel):
     use_llm_annotate: bool = False
     source_type: str = "api"
     metadata: Optional[dict] = None
+    agent_id: Optional[str] = None          # Patch 1+4: agent isolation + embedding passthrough
+    embedding: Optional[list[float]] = None
 
 
 class QueryRequest(BaseModel):
@@ -105,10 +107,13 @@ class QueryRequest(BaseModel):
     mode: str = "task"
     top_k: int = 12
     token_budget: int = 500
+    agent_id: Optional[str] = None          # Patch 2+5: agent isolation + stream filter
+    stream: Optional[str] = None
 
 
 class ContextRequest(BaseModel):
     top_k: int = 5
+    agent_id: Optional[str] = None          # Patch 3: agent isolation for context
 
 
 class FeedbackRequest(BaseModel):
@@ -212,6 +217,8 @@ async def api_store(req: StoreRequest):
         atom_id = store_atom(
             content=req.content, stream=stream, profile=profile,
             **annotations, source_type=req.source_type, metadata=req.metadata,
+            agent_id=req.agent_id or _cfg("agents", "default_agent_id", "default"),
+            embedding=req.embedding,
         )
 
         if atom_id is None:
@@ -243,7 +250,9 @@ async def api_query(req: QueryRequest):
 
         t0 = time.time()
         result = hybrid_retrieve_with_triples(req.query, mode=req.mode,
-                                               token_budget=req.token_budget)
+                                       token_budget=req.token_budget,
+                                       agent_id=req.agent_id,
+                                       stream=req.stream)
         latency_ms = (time.time() - t0) * 1000
 
         # Determine confidence tier
@@ -419,6 +428,29 @@ async def api_stats():
         return get_stats()
     return await asyncio.to_thread(_stats)
 
+
+
+# ─── POST /v1/tombstone ───────────────────────────────────────────────────────
+# Patch 6: Explicit tombstone-by-ID for OpenClaw memory_forget
+
+class TombstoneRequest(BaseModel):
+    atom_id: str
+
+@app.post("/v1/tombstone", dependencies=[Depends(verify_api_key)])
+async def api_tombstone(req: TombstoneRequest):
+    def _tombstone():
+        from .core import get_db
+        conn = get_db()
+        cursor = conn.execute("SELECT id, state FROM atoms WHERE id = ?", (req.atom_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {"success": False, "reason": "atom not found"}
+        if row[1] == "tombstone":
+            return {"success": True, "reason": "already tombstoned"}
+        conn.execute("UPDATE atoms SET state = 'tombstone' WHERE id = ?", (req.atom_id,))
+        conn.commit()
+        return {"success": True, "atom_id": req.atom_id, "previous_state": row[1]}
+    return await asyncio.to_thread(_tombstone)
 
 # ─── POST /v1/triples/extract ─────────────────────────────────────────────────
 

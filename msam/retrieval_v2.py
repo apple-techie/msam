@@ -758,6 +758,7 @@ def retrieve_v2(
     query: str,
     mode: str = "task",
     top_k: int = 12,
+    agent_id: str = None,
 ) -> list[dict]:
     """
     Full v2 retrieval pipeline. All 9 improvements in sequence.
