@@ -1,0 +1,50 @@
+{
+  "id": "msam-bridge",
+  "name": "Memory (MSAM Bridge)",
+  "description": "Multi-Stream Adaptive Memory with ACT-R scoring, confidence-gated retrieval, knowledge graph, and cognitive decay. Bridges OpenClaw to MSAM with circuit breaker fallback to lancedb-pro.",
+  "version": "1.0.0",
+  "kind": "memory",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "msamUrl": {
+        "type": "string",
+        "default": "http://127.0.0.1:3901"
+      },
+      "msamApiKey": {
+        "type": "string",
+        "description": "MSAM API key (optional, uses MSAM_API_KEY env var if set)"
+      },
+      "agentId": {
+        "type": "string",
+        "default": "enduru"
+      },
+      "vocEnabled": {
+        "type": "boolean",
+        "default": false
+      },
+      "fallbackToLancedb": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoCapture": {
+        "type": "boolean",
+        "default": true
+      },
+      "autoRecall": {
+        "type": "boolean",
+        "default": true
+      },
+      "enableManagementTools": {
+        "type": "boolean",
+        "default": true
+      },
+      "dualWrite": {
+        "type": "boolean",
+        "default": true,
+        "description": "Write to both MSAM and lancedb-pro during transition"
+      }
+    }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "name": "msam-bridge",
+  "version": "1.0.0",
+  "description": "OpenClaw memory plugin bridging to MSAM (Multi-Stream Adaptive Memory)",
+  "type": "module",
+  "main": "index.ts",
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "license": "MIT"
+}
