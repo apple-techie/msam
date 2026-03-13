@@ -254,14 +254,20 @@ def extract_triples_llm(content: str, atom_id: str = "") -> list[dict]:
     Returns empty list if atom is skipped or extraction fails."""
     import requests
 
-    api_key = os.environ.get("NVIDIA_NIM_API_KEY")
+    # Try OpenAI first, fall back to NVIDIA NIM
+    api_key = os.environ.get("OPENAI_API_KEY")
+    _llm_url = "https://api.openai.com/v1/chat/completions"
+    _llm_model = _cfg('triples', 'llm_model', 'gpt-4o-mini')
+
+    if not api_key:
+        api_key = os.environ.get("NVIDIA_NIM_API_KEY")
+        _llm_url = _cfg('triples', 'llm_url', 'https://integrate.api.nvidia.com/v1/chat/completions')
+        _llm_model = _cfg('triples', 'llm_model', 'mistralai/mistral-large-3-675b-instruct-2512')
+
     if not api_key:
         return []
 
     prompt = EXTRACTION_PROMPT.format(content=content)
-
-    _llm_url = _cfg('triples', 'llm_url', 'https://integrate.api.nvidia.com/v1/chat/completions')
-    _llm_model = _cfg('triples', 'llm_model', 'mistralai/mistral-large-3-675b-instruct-2512')
     try:
         r = requests.post(
             _llm_url,

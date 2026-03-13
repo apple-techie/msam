@@ -23,7 +23,7 @@ from .core import get_stats
 app = Flask(__name__)
 
 # Security: restrict CORS origins and optionally require API key
-_api_origins = _cfg("api", "allowed_origins", ["http://127.0.0.1:3000", "http://localhost:3000"])
+_api_origins = _cfg("api", "allowed_origins", ["http://127.0.0.1:3000", "http://localhost:3000", "https://mac-studio.tail3c92ee.ts.net:8444"])
 _api_key = _cfg("api", "api_key", None)
 
 CORS(app, origins=_api_origins)
@@ -302,7 +302,10 @@ def grafana_query():
         datapoints = []
         
         # ── Retrieval metrics ──────────────────────────────────
-        if metric.startswith("retrieval_"):
+        if metric == "retrieval_miss_count":
+            datapoints = _query_access_events_by_filter("event_type", "retrieval_miss", ts_from, ts_to)
+
+        elif metric.startswith("retrieval_"):
             field_map = {
                 "retrieval_tokens": "tokens_used",
                 "retrieval_latency": "latency_ms",
@@ -891,3 +894,239 @@ if __name__ == "__main__":
     _host = _cfg('api', 'host', '127.0.0.1')
     _port = _cfg('api', 'port', 3001)
     app.run(host=_host, port=_port, debug=False)
+
+
+# ─── Knowledge Graph Visualization ───────────────────────────────
+
+@app.route("/grafana/graph/fields", methods=["POST"])
+def grafana_graph_fields():
+    """Return node and edge frames for Grafana Node Graph panel."""
+    from .config import get_data_dir as _gdd_local
+    db_path = str(_gdd_local() / _cfg('storage', 'db_path', 'msam.db'))
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    triples = conn.execute(
+        "SELECT id, subject, predicate, object, confidence FROM triples WHERE state = 'active'"
+    ).fetchall()
+    conn.close()
+
+    if not triples:
+        return jsonify({"nodes": [], "edges": []})
+
+    # Build unique nodes
+    entity_set = set()
+    for t in triples:
+        entity_set.add(t["subject"])
+        entity_set.add(t["object"])
+
+    # Count connections per entity
+    entity_connections = {}
+    for t in triples:
+        entity_connections[t["subject"]] = entity_connections.get(t["subject"], 0) + 1
+        entity_connections[t["object"]] = entity_connections.get(t["object"], 0) + 1
+
+    # Assign stable IDs
+    entity_list = sorted(entity_set)
+    entity_to_id = {e: str(i) for i, e in enumerate(entity_list)}
+
+    nodes = []
+    for entity in entity_list:
+        nodes.append({
+            "id": entity_to_id[entity],
+            "title": entity,
+            "mainStat": str(entity_connections.get(entity, 0)),
+            "arc__connections": entity_connections.get(entity, 0),
+        })
+
+    edges = []
+    for t in triples:
+        edges.append({
+            "id": t["id"],
+            "source": entity_to_id[t["subject"]],
+            "target": entity_to_id[t["object"]],
+            "mainStat": t["predicate"],
+        })
+
+    return jsonify({"nodes": nodes, "edges": edges})
+
+
+@app.route("/grafana/graph/stats")
+def grafana_graph_stats():
+    """Quick stats about the knowledge graph."""
+    from .config import get_data_dir as _gdd_local
+    db_path = str(_gdd_local() / _cfg('storage', 'db_path', 'msam.db'))
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+
+    total = conn.execute("SELECT COUNT(*) FROM triples WHERE state = 'active'").fetchone()[0]
+    subjects = conn.execute("SELECT COUNT(DISTINCT subject) FROM triples WHERE state = 'active'").fetchone()[0]
+    objects = conn.execute("SELECT COUNT(DISTINCT object) FROM triples WHERE state = 'active'").fetchone()[0]
+    predicates = conn.execute("SELECT COUNT(DISTINCT predicate) FROM triples WHERE state = 'active'").fetchone()[0]
+
+    # Top entities by connection count
+    top = conn.execute("""
+        SELECT entity, COUNT(*) as cnt FROM (
+            SELECT subject as entity FROM triples WHERE state = 'active'
+            UNION ALL
+            SELECT object as entity FROM triples WHERE state = 'active'
+        ) GROUP BY entity ORDER BY cnt DESC LIMIT 10
+    """).fetchall()
+
+    conn.close()
+
+    return jsonify({
+        "total_triples": total,
+        "unique_subjects": subjects,
+        "unique_objects": objects,
+        "unique_predicates": predicates,
+        "unique_entities": subjects + objects,
+        "top_entities": [{"entity": r["entity"], "connections": r["cnt"]} for r in top],
+    })
+
+
+@app.route("/graph")
+def knowledge_graph_viewer():
+    """Interactive knowledge graph visualization using D3.js force-directed layout."""
+    return """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>MSAM Knowledge Graph</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0b0e17; color: #e0e0e0; font-family: -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; }
+  #controls { position: fixed; top: 12px; left: 12px; z-index: 10; display: flex; gap: 8px; align-items: center; }
+  #controls input { background: #1a1e2e; border: 1px solid #333; color: #e0e0e0; padding: 6px 10px; border-radius: 6px; font-size: 13px; width: 200px; }
+  #controls .stat { background: #1a1e2e; border: 1px solid #333; padding: 6px 12px; border-radius: 6px; font-size: 12px; }
+  #controls .stat b { color: #7eb8f7; }
+  #tooltip { position: fixed; background: #1a1e2e; border: 1px solid #555; padding: 8px 12px; border-radius: 6px; font-size: 12px; pointer-events: none; display: none; z-index: 100; max-width: 300px; }
+  svg { width: 100vw; height: 100vh; }
+  .link { stroke-opacity: 0.4; }
+  .link:hover { stroke-opacity: 1; }
+  .node circle { stroke: #0b0e17; stroke-width: 1.5px; cursor: pointer; }
+  .node text { font-size: 10px; fill: #ccc; pointer-events: none; }
+  .label-bg { fill: #0b0e17; opacity: 0.7; }
+</style>
+</head>
+<body>
+<div id="controls">
+  <input type="text" id="search" placeholder="Search entities...">
+  <div class="stat">Nodes: <b id="nodeCount">0</b></div>
+  <div class="stat">Edges: <b id="edgeCount">0</b></div>
+  <div class="stat">Triples: <b id="tripleCount">0</b></div>
+</div>
+<div id="tooltip"></div>
+<svg></svg>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const width = window.innerWidth, height = window.innerHeight;
+const svg = d3.select("svg").attr("viewBox", [0, 0, width, height]);
+const g = svg.append("g");
+
+// Zoom
+svg.call(d3.zoom().scaleExtent([0.1, 8]).on("zoom", e => g.attr("transform", e.transform)));
+
+const tooltip = d3.select("#tooltip");
+
+// Color scale by connection count
+const color = d3.scaleSequential(d3.interpolateViridis).domain([1, 20]);
+
+fetch("/grafana/graph/fields", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"})
+.then(r => r.json())
+.then(data => {
+  const nodes = data.nodes;
+  const links = data.edges.map(e => ({...e, source: e.source, target: e.target}));
+
+  document.getElementById("nodeCount").textContent = nodes.length;
+  document.getElementById("edgeCount").textContent = links.length;
+  document.getElementById("tripleCount").textContent = links.length;
+
+  const sim = d3.forceSimulation(nodes)
+    .force("link", d3.forceLink(links).id(d => d.id).distance(80))
+    .force("charge", d3.forceManyBody().strength(-120))
+    .force("center", d3.forceCenter(width/2, height/2))
+    .force("collision", d3.forceCollide(20));
+
+  const link = g.append("g").selectAll("line")
+    .data(links).join("line")
+    .attr("class", "link")
+    .attr("stroke", "#4a5568")
+    .attr("stroke-width", 1)
+    .on("mouseover", (e, d) => {
+      tooltip.style("display", "block")
+        .style("left", e.pageX + 10 + "px")
+        .style("top", e.pageY - 10 + "px")
+        .html("<b>" + (nodes.find(n=>n.id===d.source.id)||{}).title + "</b> → " + d.mainStat + " → <b>" + (nodes.find(n=>n.id===d.target.id)||{}).title + "</b>");
+    })
+    .on("mouseout", () => tooltip.style("display", "none"));
+
+  const node = g.append("g").selectAll(".node")
+    .data(nodes).join("g")
+    .attr("class", "node")
+    .call(d3.drag()
+      .on("start", (e,d) => { if(!e.active) sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; })
+      .on("drag", (e,d) => { d.fx=e.x; d.fy=e.y; })
+      .on("end", (e,d) => { if(!e.active) sim.alphaTarget(0); d.fx=null; d.fy=null; })
+    );
+
+  node.append("circle")
+    .attr("r", d => Math.max(4, Math.min(20, d.arc__connections * 1.5)))
+    .attr("fill", d => color(d.arc__connections))
+    .on("mouseover", (e, d) => {
+      tooltip.style("display", "block")
+        .style("left", e.pageX + 10 + "px")
+        .style("top", e.pageY - 10 + "px")
+        .html("<b>" + d.title + "</b><br>Connections: " + d.arc__connections);
+      // Highlight connected
+      link.attr("stroke", l => (l.source.id===d.id||l.target.id===d.id) ? "#7eb8f7" : "#4a5568")
+          .attr("stroke-width", l => (l.source.id===d.id||l.target.id===d.id) ? 2 : 1)
+          .attr("stroke-opacity", l => (l.source.id===d.id||l.target.id===d.id) ? 1 : 0.15);
+      node.select("circle").attr("opacity", n => {
+        if(n.id===d.id) return 1;
+        return links.some(l => (l.source.id===d.id && l.target.id===n.id)||(l.target.id===d.id && l.source.id===n.id)) ? 1 : 0.15;
+      });
+      node.select("text").attr("opacity", n => {
+        if(n.id===d.id) return 1;
+        return links.some(l => (l.source.id===d.id && l.target.id===n.id)||(l.target.id===d.id && l.source.id===n.id)) ? 1 : 0.15;
+      });
+    })
+    .on("mouseout", () => {
+      tooltip.style("display", "none");
+      link.attr("stroke", "#4a5568").attr("stroke-width", 1).attr("stroke-opacity", 0.4);
+      node.select("circle").attr("opacity", 1);
+      node.select("text").attr("opacity", 1);
+    });
+
+  // Labels for nodes with 3+ connections
+  node.filter(d => d.arc__connections >= 3).append("text")
+    .attr("dx", 12).attr("dy", 4)
+    .text(d => d.title);
+
+  sim.on("tick", () => {
+    link.attr("x1",d=>d.source.x).attr("y1",d=>d.source.y).attr("x2",d=>d.target.x).attr("y2",d=>d.target.y);
+    node.attr("transform", d => "translate("+d.x+","+d.y+")");
+  });
+
+  // Search
+  document.getElementById("search").addEventListener("input", function() {
+    const q = this.value.toLowerCase();
+    if(!q) {
+      node.select("circle").attr("opacity", 1);
+      node.select("text").attr("opacity", 1);
+      link.attr("stroke-opacity", 0.4);
+      return;
+    }
+    node.select("circle").attr("opacity", d => d.title.toLowerCase().includes(q) ? 1 : 0.1);
+    node.select("text").attr("opacity", d => d.title.toLowerCase().includes(q) ? 1 : 0.1);
+    link.attr("stroke-opacity", l => {
+      const s = (nodes.find(n=>n.id===l.source.id)||{}).title||"";
+      const t = (nodes.find(n=>n.id===l.target.id)||{}).title||"";
+      return s.toLowerCase().includes(q)||t.toLowerCase().includes(q) ? 0.8 : 0.05;
+    });
+  });
+});
+</script>
+</body>
+</html>"""
+
